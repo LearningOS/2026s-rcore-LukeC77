@@ -18,6 +18,13 @@ RUN apt-get update && \
     wget \
     xz-utils
 
+# Trust bind-mounted workspace paths （2026/4/30 yifan）
+RUN git config --global --add safe.directory /mnt \
+ && git config --global --add safe.directory /mnt/os \
+ && git config --global --add safe.directory /mnt/user
+# Trust bind-mounted workspace paths （2026/4/30 yifan）
+
+
 # Set working directory
 WORKDIR /root
 

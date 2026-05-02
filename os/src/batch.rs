@@ -30,6 +30,8 @@ static USER_STACK: UserStack = UserStack {
 
 impl KernelStack {
     fn get_sp(&self) -> usize {
+        // Yifan 2026/5/1: returns the initial stack top of this region (empty stack),
+        // not the current runtime CPU sp register value.
         self.data.as_ptr() as usize + KERNEL_STACK_SIZE
     }
     pub fn push_context(&self, cx: TrapContext) -> &'static mut TrapContext {
@@ -43,6 +45,8 @@ impl KernelStack {
 
 impl UserStack {
     fn get_sp(&self) -> usize {
+        // Yifan 2026/5/1: returns the initial stack top of this region (empty stack),
+        // not the current runtime CPU sp register value.
         self.data.as_ptr() as usize + USER_STACK_SIZE
     }
 }
@@ -87,7 +91,7 @@ impl AppManager {
         // Therefore, fence.i must be executed after we have loaded
         // the code of the next app into the instruction memory.
         // See also: riscv non-priv spec chapter 3, 'Zifencei' extension.
-        asm!("fence.i");
+        asm!("fence.i"); // 保证 在它之后的取指过程必须能够看到在它之前的所有对于取指内存区域的修改 
     }
 
     pub fn get_current_app(&self) -> usize {
@@ -99,22 +103,24 @@ impl AppManager {
     }
 }
 
-lazy_static! {
-    static ref APP_MANAGER: UPSafeCell<AppManager> = unsafe {
+lazy_static! { // 用宏定义“延迟初始化的全局静态变量”。
+    // static ref 是 lazy_static! 宏提供的语法，不是 Rust 原生关键字组合。
+    // 定义一个全局静态变量，但它不是程序启动时立刻初始化，而是在第一次使用时才初始化。
+    static ref APP_MANAGER: UPSafeCell<AppManager> = unsafe { 
         UPSafeCell::new({
-            extern "C" {
-                fn _num_app();
-            }
-            let num_app_ptr = _num_app as usize as *const usize;
-            let num_app = num_app_ptr.read_volatile();
-            let mut app_start: [usize; MAX_APP_NUM + 1] = [0; MAX_APP_NUM + 1];
-            let app_start_raw: &[usize] =
-                core::slice::from_raw_parts(num_app_ptr.add(1), num_app + 1);
-            app_start[..=num_app].copy_from_slice(app_start_raw);
+            extern "C" { // 声明外部符号（来自汇编/链接产物）。
+                fn _num_app(); // 声明 _num_app 符号。这里把它当“可取地址的符号”用，不是真的要调用逻辑函数。
+            } // 结束 extern 声明块。
+            let num_app_ptr = _num_app as usize as *const usize; // 把 _num_app 符号地址转成 *const usize 指针。此地址指向 app 信息表开头。
+            let num_app = num_app_ptr.read_volatile(); // 从表头读第一个 usize，得到应用数量 num_app。volatile 表示按“易失读取”执行，不被优化掉。
+            let mut app_start: [usize; MAX_APP_NUM + 1] = [0; MAX_APP_NUM + 1]; // 在栈上准备一个固定大小数组，先全 0，用来存每个 app 的边界地址。
+            let app_start_raw: &[usize] = // 定义一个切片变量，准备绑定“原始地址表视图”。
+                core::slice::from_raw_parts(num_app_ptr.add(1), num_app + 1); // 从 num_app_ptr 后一个元素开始（跳过数量字段），构造长度 num_app+1 的 &[usize]，即边界地址表。
+            app_start[..=num_app].copy_from_slice(app_start_raw); // 把原始地址表复制到本地数组前 num_app+1 个位置。
             AppManager {
                 num_app,
                 current_app: 0,
-                app_start,
+                app_start, // 填入刚复制好的边界地址数组。
             }
         })
     };
