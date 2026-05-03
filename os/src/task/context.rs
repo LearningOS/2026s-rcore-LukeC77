@@ -23,13 +23,13 @@ impl TaskContext {
     }
     /// Create a new task context with a trap return addr and a kernel stack pointer
     pub fn goto_restore(kstack_ptr: usize) -> Self {
-        extern "C" {
-            fn __restore();
+        extern "C" {    // yifan 2026/5/2: 声明外部汇编符号，后续把它作为新任务首次恢复后的跳转入口。
+            fn __restore();    // yifan 2026/5/2: __restore 负责在任务上下文恢复后继续执行恢复流程。
         }
-        Self {
-            ra: __restore as usize,
-            sp: kstack_ptr,
-            s: [0; 12],
+        Self {    // yifan 2026/5/2: 构造用于首次被调度的任务上下文。
+            ra: __restore as usize,    // yifan 2026/5/2: 将返回地址设为 __restore，使 ret 后进入恢复入口。
+            sp: kstack_ptr,    // yifan 2026/5/2: 将栈指针设为该任务的内核栈顶。
+            s: [0; 12],    // yifan 2026/5/2: 将 s0-s11 清零初始化，作为初始被调用者保存寄存器状态。
         }
     }
 }

@@ -100,7 +100,7 @@ pub fn rust_main() -> ! {
     heap_alloc::init_heap();
     trap::init();
     loader::load_apps();
-    trap::enable_timer_interrupt();
+    trap::enable_timer_interrupt();    // yifan 2026/5/3: 置位 sie.STIE（Supervisor Timer Interrupt Enable）；1 表示允许 S 态时钟中断，0 表示屏蔽。
     timer::set_next_trigger();
     task::run_first_task();
     panic!("Unreachable in rust_main!");

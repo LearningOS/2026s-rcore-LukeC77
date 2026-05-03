@@ -78,15 +78,15 @@ impl TaskManager {
     /// Generally, the first task in task list is an idle task (we call it zero process later).
     /// But in ch3, we load apps statically, so the first task is a real app.
     fn run_first_task(&self) -> ! {
-        let mut inner = self.inner.exclusive_access();
-        let task0 = &mut inner.tasks[0];
-        task0.task_status = TaskStatus::Running;
-        let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
-        drop(inner);
-        let mut _unused = TaskContext::zero_init();
+        let mut inner = self.inner.exclusive_access();    // yifan 2026/5/3: 获取任务管理器的独占访问，准备修改任务状态并取上下文指针。
+        let task0 = &mut inner.tasks[0];    // yifan 2026/5/3: 选择第 0 个任务作为首次切入的目标任务。
+        task0.task_status = TaskStatus::Running;    // yifan 2026/5/3: 将 task0 标记为 Running，表示它即将成为当前运行任务。
+        let next_task_cx_ptr = &task0.task_cx as *const TaskContext;    // yifan 2026/5/3: 获取 task0 上下文指针，作为 __switch 的 new 上下文。
+        drop(inner);    // yifan 2026/5/3: 切换前释放 exclusive_access guard，避免切换过程中持锁。
+        let mut _unused = TaskContext::zero_init();    // yifan 2026/5/3: 首次切换没有真实旧任务，用零初始化占位作为 __switch 的 old 保存槽。
         // before this, we should drop local variables that must be dropped manually
         unsafe {
-            __switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);
+            __switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);    // yifan 2026/5/3: 保存当前内核现场到 _unused，再加载 task0 现场并跳转执行；_unused 仅临时占位，后续无调度意义。
         }
         panic!("unreachable in run_first_task!");
     }
@@ -111,9 +111,9 @@ impl TaskManager {
     fn find_next_task(&self) -> Option<usize> {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        (current + 1..current + self.num_app + 1)
-            .map(|id| id % self.num_app)
-            .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
+        (current + 1..current + self.num_app + 1)    // yifan 2026/5/3: 从当前任务后一个开始，最多检查 num_app 个位置，确保扫描一整圈。
+            .map(|id| id % self.num_app)    // yifan 2026/5/3: 对下标取模到 [0, num_app)，实现循环队列的绕回。
+            .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)    // yifan 2026/5/3: 按轮转顺序返回第一个 Ready 任务；若无则返回 None。
     }
 
     /// Switch current `Running` task to the task we have found,
@@ -126,7 +126,7 @@ impl TaskManager {
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
-            drop(inner);
+            drop(inner);    // yifan 2026/5/3: 在 __switch 前主动释放 exclusive_access 的 guard，避免切换后长期持锁导致死锁或借用冲突。
             // before this, we should drop local variables that must be dropped manually
             unsafe {
                 __switch(current_task_cx_ptr, next_task_cx_ptr);
