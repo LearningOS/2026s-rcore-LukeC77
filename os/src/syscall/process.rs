@@ -1,6 +1,6 @@
 //! Process management syscalls
 use crate::{
-    task::{exit_current_and_run_next, suspend_current_and_run_next},
+    task::{exit_current_and_run_next, suspend_current_and_run_next, get_syscall_count},
     timer::get_time_us,
 };
 
@@ -39,7 +39,22 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 }
 
 // TODO: implement the syscall
+// yifan 2026/5/3: Implement the trace syscall, which can read/write a byte in userspace or count the number of syscalls
 pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    match _trace_request {
+        0 => unsafe {
+            let ptr = _id as *const u8;
+            let v: u8 = core::ptr::read_volatile(ptr);
+            v as isize
+        },
+        1 => unsafe {
+            let ptr = _id as *mut u8;
+            let byte:u8 = _data as u8;
+            core::ptr::write_volatile(ptr, byte);
+            0
+        },
+        2 => get_syscall_count(_id),
+        _ => -1,
+    }
 }
