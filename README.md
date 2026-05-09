@@ -78,3 +78,10 @@ $ cd ci-user && make test CHAPTER=$ID
 ```
 
 Notice: $ID is from [3,4,5,6,8]
+
+
+
+# 调试查看信息：
+```bash
+$ LOG=TRACE make run
+```

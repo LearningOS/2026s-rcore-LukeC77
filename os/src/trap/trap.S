@@ -5,9 +5,9 @@
 .macro LOAD_GP n
     ld x\n, \n*8(sp)
 .endm
-    .section .text.trampoline
-    .globl __alltraps
-    .globl __restore
+    .section .text.trampoline                                                   # yifan 2026/5/7: 将 trap 入口/返回汇编放入独立段，便于链接器精确放置到 trampoline 页。
+    .globl __alltraps                                                            # yifan 2026/5/7: 导出统一 trap 入口符号，内核可把 stvec 指向该跳板入口。
+    .globl __restore                                                             # yifan 2026/5/7: 导出返回用户态符号，和 __alltraps 一起构成用户态/内核态切换门厅。
     .align 2
 __alltraps:
     csrrw sp, sscratch, sp

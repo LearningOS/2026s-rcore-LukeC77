@@ -24,7 +24,7 @@ impl<T> UPSafeCell<T> {
         }
     }
     /// Panic if the data has been borrowed.
-    pub fn exclusive_access(&self) -> RefMut<'_, T> {
+    pub fn exclusive_access(&self) -> RefMut<'_, T> { // yifan 2026/5/6: exclusive_access 方法返回一个 RefMut<T>，它是 RefCell<T> 的可变借用类型；调用者通过这个 RefMut<T> 来访问和修改内部数据。
         self.inner.borrow_mut()
     }
 }

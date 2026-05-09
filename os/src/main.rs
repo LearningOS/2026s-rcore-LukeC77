@@ -20,7 +20,7 @@
 #![no_std]
 #![no_main]
 #![feature(panic_info_message)]
-#![feature(alloc_error_handler)]
+#![feature(alloc_error_handler)]    // yifan 2026/5/4 启用 nightly 的 alloc_error_handler 特性，使 no_std 内核可定义分配失败处理函数；否则 #[alloc_error_handler] 无法编译。
 
 #[macro_use]
 extern crate bitflags;
@@ -97,7 +97,10 @@ fn kernel_log_info() {
 #[no_mangle]
 /// the rust entry-point of os
 pub fn rust_main() -> ! {
+    // yifan 2026/5/9: 在内核正式初始化前把 .bss 段清零，确保未初始化的全局/静态变量初值为 0，避免后续 mm/log/task 等模块读取到脏数据。
+    // .bss 是 RAM 区域，启动时其内容不保证为 0（可能是随机值或残留），而语言/ABI 要求未初始化全局静态变量初值为 0，所以必须主动清零。
     clear_bss();
+    
     kernel_log_info();
     mm::init();
     println!("[kernel] back to world!");
