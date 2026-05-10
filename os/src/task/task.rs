@@ -42,14 +42,15 @@ impl TaskControlBlock {
     /// Based on the elf info in program, build the contents of task in a new address space
     pub fn new(elf_data: &[u8], app_id: usize) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
-        let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
-            .unwrap()
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);    // yifan 2026/5/10: 解析传入的 ELF 格式数据构造应用的地址空间 memory_set 并获得其他信息；
+        let trap_cx_ppn = memory_set    // yifan 2026/5/10: 从地址空间 memory_set 中查多级页表找到应用地址空间中的 Trap 上下文实际被放在哪个物理页帧；
+            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into()) // yifan 2026/5/10: trap_cx_ppn 是 TrapContext 那一页对应的物理页号（PhysPageNum）。
+            .unwrap()    // yifan 2026/5/10: TRAP_CONTEXT_BASE 是每个应用地址空间里 TrapContext 放置的固定虚拟地址（更准确说是固定页起始地址）。对所有应用来说，这个 VA 一样。但通过各自页表映射到不同物理页，所以每个应用的 TrapContext 内容彼此隔离。
             .ppn();
         let task_status = TaskStatus::Ready;
         // map a kernel-stack in kernel space
-        let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(app_id);
+        // yifan 2026/5/10: 根据传入的应用 ID app_id 调用在 config 子模块中定义的 kernel_stack_position 找到 应用的内核栈预计放在内核地址空间 KERNEL_SPACE 中的哪个位置，并通过 insert_framed_area 实际将这个逻辑段 加入到内核地址空间中；
+        let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(app_id);    
         KERNEL_SPACE.exclusive_access().insert_framed_area(
             kernel_stack_bottom.into(),
             kernel_stack_top.into(),

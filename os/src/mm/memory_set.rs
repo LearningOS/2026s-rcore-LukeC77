@@ -377,18 +377,18 @@ bitflags! {
 
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
-    let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
-    let bottom = top - KERNEL_STACK_SIZE;
+    let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);    // yifan 2026/5/10: 这里不是全系统唯一内核栈，而是每个应用/任务按 app_id 分配独立内核栈；从 TRAMPOLINE 向下排布，每个槽位间距为“栈大小+一页保护页”。
+    let bottom = top - KERNEL_STACK_SIZE;    // yifan 2026/5/10: 栈区间为 [bottom, top)；额外预留的 PAGE_SIZE 作为 guard page（通常不映射），用于栈溢出保护，避免踩到相邻任务内核栈。
     (bottom, top)
 }
 
 /// remap test in kernel space
 #[allow(unused)]
-pub fn remap_test() {
-    let mut kernel_space = KERNEL_SPACE.exclusive_access();
-    let mid_text: VirtAddr = ((stext as usize + etext as usize) / 2).into();
-    let mid_rodata: VirtAddr = ((srodata as usize + erodata as usize) / 2).into();
-    let mid_data: VirtAddr = ((sdata as usize + edata as usize) / 2).into();
+pub fn remap_test() {    // yifan 2026/5/9: 定义内核地址空间重映射检查函数，用于验证关键段权限是否正确。
+    let mut kernel_space = KERNEL_SPACE.exclusive_access();    // yifan 2026/5/9: 获取 KERNEL_SPACE 的独占访问句柄，后续需要读取其页表项权限。
+    let mid_text: VirtAddr = ((stext as usize + etext as usize) / 2).into();    // yifan 2026/5/9: 取 .text 段中点虚拟地址，作为代码段权限检查样本点。
+    let mid_rodata: VirtAddr = ((srodata as usize + erodata as usize) / 2).into();    // yifan 2026/5/9: 取 .rodata 段中点虚拟地址，作为只读数据段权限检查样本点。
+    let mid_data: VirtAddr = ((sdata as usize + edata as usize) / 2).into();    // yifan 2026/5/9: 取 .data 段中点虚拟地址，作为可写数据段权限检查样本点。
     assert!(!kernel_space
         .page_table
         .translate(mid_text.floor())

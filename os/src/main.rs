@@ -100,11 +100,13 @@ pub fn rust_main() -> ! {
     // yifan 2026/5/9: 在内核正式初始化前把 .bss 段清零，确保未初始化的全局/静态变量初值为 0，避免后续 mm/log/task 等模块读取到脏数据。
     // .bss 是 RAM 区域，启动时其内容不保证为 0（可能是随机值或残留），而语言/ABI 要求未初始化全局静态变量初值为 0，所以必须主动清零。
     clear_bss();
-    
+    // yifan 2026/5/9: 打印内核内存布局相关日志（.text/.rodata/.data/.bss、boot stack 边界等），用于启动早期调试和核对链接地址是否正确。
     kernel_log_info();
-    mm::init();
+    // yifan 2026/5/9: 初始化内存管理子系统（内核堆分配器、物理页帧分配器并激活内核页表），为后续 trap/任务等模块提供可用的动态分配与分页映射能力。
+    mm::init();    
     println!("[kernel] back to world!");
-    mm::remap_test();
+    // yifan 2026/5/9: 执行内核页表映射自检，验证关键段权限（如 .text 不可写、.rodata 不可写、.data 不可执行）；若映射错误会触发 assert/panic 及时停止。
+    mm::remap_test();    
     trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_trigger();
