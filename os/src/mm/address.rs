@@ -210,7 +210,7 @@ pub trait StepByOne {
 }
 impl StepByOne for VirtPageNum {
     fn step(&mut self) {
-        self.0 += 1;
+        self.0 += 1; // yifan 2026/5/13 vpn是页号，是整数，步进就是加1
     }
 }
 

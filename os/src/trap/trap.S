@@ -77,10 +77,10 @@ __emergency:
 __emergency_end:
 
 
-    .section .text
-    .globl __trap_from_kernel
+    .section .text                  # yifan 2026/5/12: 切换到代码段，下面开始放置内核 trap 入口相关指令。
+    .globl __trap_from_kernel       # yifan 2026/5/12: 导出 __trap_from_kernel 符号，供 Rust 侧 extern 引用并写入 stvec。
     # 2^2=4 bytes aligned for stvec
-    .align 2
-__trap_from_kernel:
-    la sp, __emergency_end
-    j trap_from_kernel    
+    .align 2                        # yifan 2026/5/12: 将入口按 4 字节对齐，满足 stvec 入口与指令对齐要求。
+__trap_from_kernel:                 # yifan 2026/5/12: 内核态发生 trap 时的汇编入口标签。
+    la sp, __emergency_end          # yifan 2026/5/12: 将 sp 切到紧急栈顶，避免原内核栈损坏导致无法继续处理。
+    j trap_from_kernel              # yifan 2026/5/12: 无条件跳转到 Rust 的 trap_from_kernel 执行统一 trap 处理逻辑。

@@ -17,7 +17,7 @@ use address::{StepByOne, VPNRange};
 pub use frame_allocator::{frame_alloc, FrameTracker};
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_stack_position, MapPermission, MemorySet, KERNEL_SPACE};
-pub use page_table::{translated_byte_buffer, PageTableEntry};
+pub use page_table::{translated_byte_buffer, PageTableEntry, translated_byte_buffer_checked}; // yifan 2026/5/13: 新增 translated_byte_buffer_checked 函数的 re-export，使其在 mm 模块外部可用；这个函数在 sys_get_time 中被调用，用于检查和翻译用户缓冲区地址。
 pub use page_table::{PTEFlags, PageTable};
 
 /// initiate heap allocator, frame allocator and kernel space

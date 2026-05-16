@@ -161,6 +161,10 @@ impl PageTable {
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
+// yifan 2026/5/12: translated_byte_buffer 的逻辑是把用户虚拟地址区间 [ptr, ptr+len) 按页翻译成若干可访问切片，而不是要求整段物理连续。
+// yifan 2026/5/12: 过程是：用 token 构造页表视图，循环从 start 到 end；每轮定位 vpn，translate 得到 ppn，计算本轮结束地址并切片 push，直到覆盖完整区间。
+// yifan 2026/5/12: 返回 Vec<&'static mut [u8]> 的原因是用户缓冲区可能跨多个页，且这些页映射到的物理页不保证连续。
+// yifan 2026/5/12: v.push(...) 存入的是当前物理页对应区间的可变切片引用（&'static mut [u8]），不是字节数据的拷贝副本。
 pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
@@ -171,6 +175,42 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         let mut vpn = start_va.floor();
         let ppn = page_table.translate(vpn).unwrap().ppn();
         vpn.step();
+        let mut end_va: VirtAddr = vpn.into(); // yifan 2026/5/13: 计算当前页剩余部分的结束地址；vpn.step() 后的 vpn 是下一页的页号，vpn.into() 就是下一页的起始地址, offset一定是0。
+        end_va = end_va.min(VirtAddr::from(end)); // yifan 2026/5/13: 计算本轮切片的结束地址；end_va 是当前页剩余部分的结束地址和用户缓冲区结束地址 end 的较小者，确保切片不越界。当end比end_va小，有可能offset不为0
+        if end_va.page_offset() == 0 { // yifan 2026/5/13: 如果 end_va 刚好落在页边界，说明本轮切片正好覆盖到当前页末尾；此时直接切片到页末即可，不用再计算 offset。
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
+        }
+        start = end_va.into();
+    }
+    v
+}
+
+/// Translate a user virtual buffer into kernel-accessible byte slices with permission checks.
+/// Returns `None` if any page is unmapped or lacks required permissions.
+// yifan 2026/5/13: 此版本函数会检查vpn映射的ppn是否存在，若不存在返回None;若存在但无效或不可读也返回None；只有当映射存在且有效可读时才返回切片Vec。
+pub fn translated_byte_buffer_checked(token: usize, ptr: *const u8, len: usize, need_write: bool) -> Option<Vec<&'static mut [u8]>> {
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.floor();
+        let pte = page_table.translate(vpn)?;
+        // yifan 2026/5/13: 检查用户页是否具有 U（用户）权限；如果没有，说明该页不属于用户空间，返回 None。
+        if (pte.flags() & PTEFlags::U) == PTEFlags::empty() {
+            return None;
+        }
+        if !pte.is_valid() || !pte.readable() {
+            return None;
+        }
+        if need_write && !pte.writable() {
+            return None;
+        }
+        let ppn = pte.ppn();
+        vpn.step();
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
         if end_va.page_offset() == 0 {
@@ -180,5 +220,5 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         }
         start = end_va.into();
     }
-    v
+    Some(v)
 }

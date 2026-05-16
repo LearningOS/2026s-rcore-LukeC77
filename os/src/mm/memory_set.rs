@@ -257,8 +257,123 @@ impl MemorySet {
             false
         }
     }
+
+    /// yifan 2026/5/15 为sys_mmap写的方法，检查是否内存已经映射
+    pub fn overlap(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        // 映射的范围是[start_vpn, end_vpn)，所以当 area 的 vpn_range 在 end_vpn 之前或者在 start_vpn 之后时才不重叠
+        for area in self.areas.iter() {
+            let area_l = area.vpn_range.get_start();
+            let area_r = area.vpn_range.get_end();
+            if area_l >= end_vpn || area_r <= start_vpn{
+                continue;
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+
+    /// yifan 2026/5/15 为sys_munmap写的方法，检查是否内存已经映射
+    pub fn full_mapped(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            let pte = self.translate(vpn);
+            let mut mapped = false;
+            if pte.is_some() && pte.unwrap().is_valid() {
+                mapped = true;
+            }
+            trace!("full_mapped check vpn={:?} mapped={}", vpn, mapped);
+            if !mapped {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// yifan 2026/5/15 为sys_munmap写的方法, 取消映射并回收物理页帧
+    pub fn unmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut v: Vec<VPNRange> = Vec::new();
+        let (areas, page_table) = (&mut self.areas, &mut self.page_table);
+
+        //遍历areas，找到与[start_vpn, end_vpn)重叠的部分，记录在vec中
+        for area in areas.iter() {
+            let area_l = area.vpn_range.get_start();
+            let area_r = area.vpn_range.get_end();
+            if area_l >= end_vpn || area_r <= start_vpn { // 不重叠
+                v.push(VPNRange::new(area_l, area_l)); // 不重叠的部分记录为一个空区间，后续遍历vec时会跳过
+            } else if area_l >= start_vpn && area_r <= end_vpn { // 完全重叠
+                v.push(VPNRange::new(area_l, area_r));
+            } else if area_l >= start_vpn && area_r > end_vpn { // 左边界重叠
+                v.push(VPNRange::new(area_l, end_vpn));
+            } else if area_l < start_vpn && area_r <= end_vpn { // 右边界重叠
+                v.push(VPNRange::new(start_vpn, area_r));
+            } else { // 中间重叠: area_l < start_vpn && area_r > end_vpn
+                v.push(VPNRange::new(start_vpn, end_vpn));
+            }
+        }
+
+        // 记录需要取消映射的区间的索引，之后统一从后向前删除
+        let mut delete_indices: Vec<usize> = Vec::new();
+        //遍历vec，取消映射
+        for (i, range) in v.iter().enumerate() {
+            let new_l = range.get_start();
+            let new_r = range.get_end();
+            if new_l == new_r { // 空区间，跳过
+                continue;
+            }
+            
+            let area_l = areas[i].vpn_range.get_start();
+            let area_r = areas[i].vpn_range.get_end();
+            
+            if area_l == new_l && area_r == new_r { // 完全重叠，直接删除
+                areas[i].unmap(page_table);
+                //暂时不删除vector中的areas[i]，否则后续遍历会出问题。可以先做标记，最后统一删除
+                delete_indices.push(i);
+            } else if area_l == new_l && area_r > new_r { // 左边界重叠，修改左边界，保留右边界
+                for vpn in VPNRange::new(area_l, new_r) {
+                    areas[i].unmap_one(page_table, vpn);
+                }
+                areas[i].vpn_range = VPNRange::new(new_r, area_r);
+            } else if area_l < new_l && area_r == new_r { // 右边界重叠，修改右边界，保留左边界
+                areas[i].shrink_to(page_table, new_l);
+            } else { // 中间重叠: area_l < new_l && area_r > new_r, 修改右边界，保留左边界
+                let right_data_frames = areas[i].data_frames.split_off(&new_r); // 将右边界之后的映射关系分离出来，保存在right_data_frames中
+                let _mid_data_frames = areas[i].data_frames.split_off(&new_l); // 将中间区间的映射关系分离出来，保存在mid_data_frames中, 同时也将左侧区间的映射关系保留在areas[i].data_frames中
+                // 取消[new_l, new_r)的映射关系
+                for vpn in VPNRange::new(new_l, new_r) {
+                    areas[i].unmap_one(page_table, vpn);
+                }
+                // 修改原区间的右边界，保留左边界
+                areas[i].vpn_range = VPNRange::new(area_l, new_l);
+                // 将右边界之后的映射关系重新插入到areas中
+                let map_type = areas[i].map_type;
+                let map_perm = areas[i].map_perm;
+                areas.push(MapArea {
+                    vpn_range: VPNRange::new(new_r, area_r),
+                    data_frames: right_data_frames,
+                    map_type,
+                    map_perm,
+                });
+            }
+        }
+
+        // 从后向前删除完全重叠的区间，避免索引问题
+        for i in delete_indices.iter().rev() {
+            areas.remove(*i);
+        }
+
+
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
+/// MapArea 是一段虚拟页区间；data_frames 就是在这种区间里记录“该区间内每个 VPN 对应的物理页帧（可得到 PPN）”。
+/// 通常只对 Framed 类型需要这张表；Identical 映射一般不需要逐页分配并记录 data_frames。
 pub struct MapArea {
     vpn_range: VPNRange,    /* yifan 2026/5/6: VPNRange 是类型别名，实际为 SimpleRange<VirtPageNum>，表示一段连续的虚拟页号范围（左闭右开，迭代到 end 停止）。 */
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,    /* yifan 2026/5/6: BTreeMap 是基于 B-Tree 的有序键值结构，按键有序存储并支持 O(log n) 查找/插入/删除；这里用于按 VirtPageNum 有序管理映射到的物理页帧。 MapArea 持有 FrameTracker，在 MapArea 回收/销毁时自动 drop，触发页帧归还给 frame allocator。顺带也能按 vpn 快速定位对应帧。 */

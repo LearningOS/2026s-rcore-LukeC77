@@ -39,13 +39,14 @@ fn set_kernel_trap_entry() {
         fn __trap_from_kernel();
     }
     unsafe {
-        stvec::write(__trap_from_kernel as usize, TrapMode::Direct);
+        // yifan 2026/5/12: stvec 是 S 态 trap 向量寄存器，S 态发生中断/异常时 CPU 会读取它决定跳转入口。
+        stvec::write(__trap_from_kernel as usize, TrapMode::Direct);    // yifan 2026/5/12: 将 stvec 设置为内核 trap 入口 __trap_from_kernel，用于处理内核态发生的中断/异常。    // yifan 2026/5/12: 与第 49 行不冲突，stvec 由内核在不同阶段切换；此处对应内核态 trap 入口。
     }
 }
 
 fn set_user_trap_entry() {
     unsafe {
-        stvec::write(TRAMPOLINE as usize, TrapMode::Direct);
+        stvec::write(TRAMPOLINE as usize, TrapMode::Direct);    // yifan 2026/5/12: 将 stvec 设置为用户态 trap 入口 TRAMPOLINE，使用户态中断/异常/系统调用先进入 trampoline。    // yifan 2026/5/12: 与第 43 行分工不同；43 行对应内核态 trap，49 行对应用户态 trap。
     }
 }
 
@@ -112,11 +113,18 @@ pub fn trap_return() -> ! {
         fn __alltraps();
         fn __restore();
     }
+
+    // yifan 2026/5/12: 这里是在做地址平移：先取 __restore 相对 __alltraps 的段内偏移，再加上 TRAMPOLINE 基址，得到 __restore 在 trampoline 映射下的虚拟地址 restore_va。
+    // yifan 2026/5/12: __alltraps 是 trampoline 段起点符号；TRAMPOLINE 是该段在统一映射中的基址常量。两者不必数值相等，但在各自视角下都表示“这段代码的起点”。
+    // yifan 2026/5/12: 关键性质是同一段代码内相对偏移不变：设 A=addr(__alltraps), R=addr(__restore), T=TRAMPOLINE，则 R-A=R'-T，故 R'=(R-A)+T。
     let restore_va = __restore as usize - __alltraps as usize + TRAMPOLINE;
     // trace!("[kernel] trap_return: ..before return");
     unsafe {
         asm!(
-            "fence.i",
+            // yifan 2026/5/12: 使用 fence.i 指令清空指令缓存 i-cache 。
+            // 这是因为，在内核中进行的一些操作可能导致一些原先存放某个应用代码的物理页帧如今用来存放数据或者是其他应用的代码，
+            // i-cache 中可能还保存着该物理页帧的错误快照。因此我们直接将整个 i-cache 清空避免错误。
+            "fence.i",                 
             "jr {restore_va}",         // jump to new addr of __restore asm function
             restore_va = in(reg) restore_va,
             in("a0") trap_cx_ptr,      // a0 = virt addr of Trap Context

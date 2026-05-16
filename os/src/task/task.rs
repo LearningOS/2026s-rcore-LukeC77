@@ -1,6 +1,7 @@
 //! Types related to task management
 use super::TaskContext;
 use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::MAX_SYSCALL_NUM; // yifan 2026/5/14 添加
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
@@ -28,6 +29,9 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// yifan 2026/5/14: 记录当前task每个syscall的调用次数
+    pub syscall_count: [usize; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlock {
@@ -58,14 +62,21 @@ impl TaskControlBlock {
         );
         let task_control_block = Self {
             task_status,
+            // yifan 2026/5/10: 在应用的内核栈顶压入一个跳转到 trap_return 
+            // 而不是 __restore 的任务上下文，这主要是为了能够支持对该应用的启动并顺利切换到用户地址空间执行。
+            // 在构造方式上，只是将 ra 寄存器的值设置为 trap_return 的地址。 trap_return 是后面要介绍的新版的 Trap 处理的一部分。
             task_cx: TaskContext::goto_trap_return(kernel_stack_top),
             memory_set,
             trap_cx_ppn,
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_count: [0; MAX_SYSCALL_NUM], // yifan 2026/5/14: 初始化 syscall_count 数组，记录每个 syscall 的调用次数，初始值为0。
         };
         // prepare TrapContext in user space
+        // yifan 2026/5/10: 查找该应用的 Trap 上下文的内核虚地址。由于应用的 Trap 上下文是在应用地址空间而不是在内核地址空间中，
+        // 内核只能手动查页表找到 Trap 上下文实际被放在的物理页帧，然后通过之前介绍的 在内核地址空间读写特定物理页帧的能力 
+        // 获得在用户空间的 Trap 上下文的可变引用用于初始化
         let trap_cx = task_control_block.get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
             entry_point,

@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
+use crate::mm::{MapPermission, VirtAddr}; // yifan 2026/5/15: 添加 VirtAddr 引入以便 sys_mmap 实现中使用
 
 pub use context::TaskContext;
 
@@ -115,6 +116,9 @@ impl TaskManager {
     }
 
     /// Get the current 'Running' task's token.
+    // yifan 2026/5/12: get_current_token 返回的是可直接写入 satp 的 token（MODE=Sv39 + root_ppn）。
+    // yifan 2026/5/12: satp 对应当前任务（应用）地址空间的根页表标识；调度进行 task 切换时，
+    // yifan 2026/5/12: 必须切换到目标任务对应的地址空间，因此需要取得并装载该 satp 值。
     fn get_current_token(&self) -> usize {
         let inner = self.inner.exclusive_access();
         inner.tasks[inner.current_task].get_user_token()
@@ -122,8 +126,8 @@ impl TaskManager {
 
     /// Get the current 'Running' task's trap contexts.
     fn get_current_trap_cx(&self) -> &'static mut TrapContext {
-        let inner = self.inner.exclusive_access();
-        inner.tasks[inner.current_task].get_trap_cx()
+        let inner = self.inner.exclusive_access();    // yifan 2026/5/12: 获取任务管理器内部可独占访问的数据，用于读取当前运行任务信息。
+        inner.tasks[inner.current_task].get_trap_cx()    // yifan 2026/5/12: 返回当前任务的 TrapContext 可变引用，供 trap 处理/返回阶段读写寄存器现场。
     }
 
     /// Change the current 'Running' task's program break
@@ -152,6 +156,66 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// yifan 2026/5/14 Increment syscall count for the current task
+    fn increment_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur_task = inner.current_task;
+        let task = &mut inner.tasks[cur_task]; // yifan 2026/5/14: 这里必须是可变引用才能修改taskcontrolblock中的syscall_count数组。不能直接取值，这样会将vector中的taskcontrolblock move出来。
+        task.syscall_count[syscall_id] += 1;
+    }
+
+    /// yifan 2026/5/14 Get syscall count for the current task
+    fn get_syscall_count(&self, syscall_id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let cur_task = &inner.tasks[inner.current_task];
+        cur_task.syscall_count[syscall_id] as isize
+    }
+
+    // yifan 2026/5/15 mmap
+    fn mmap(&self, start: usize, len: usize, port: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let cur_task = &mut inner.tasks[cur];
+        let memory_set = &mut cur_task.memory_set;
+        let start_va = VirtAddr(start);
+        let end_va = VirtAddr(start + len);
+        if memory_set.overlap(start_va, end_va) {
+            return -1; // yifan 2026/5/15: 如果要映射的虚拟地址区间与当前内存空间已有的映射存在重叠，返回错误码 -1。
+        }
+        let mut perm = MapPermission::U;
+        if port & 0b1 != 0 { // 可读
+            perm |= MapPermission::R;
+        }
+        if port & 0b10 != 0 { // 可写
+            perm |= MapPermission::W;
+        }
+        if port & 0b100 != 0 { // 可执行
+            perm |= MapPermission::X;
+        }
+        memory_set.insert_framed_area(start_va, end_va, perm);
+        0
+    }
+
+    // yifan 2026/5/15 munmap
+    fn munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let cur_task = &mut inner.tasks[cur];
+        let memory_set = &mut cur_task.memory_set;
+        let start_va = VirtAddr(start);
+        let end_va = VirtAddr(start + len);
+
+        trace!("munmap start={:#x} len={:#x} start_vpn={:?} end_vpn={:?}",
+            start, len, start_va.floor(), end_va.ceil());
+
+        if !memory_set.full_mapped(start_va, end_va) {
+            return -1; // yifan 2026/5/15: 如果要解除映射的虚拟地址区间不是当前内存空间已有的映射的子区间，返回错误码 -1。
+        }
+
+        memory_set.unmap(start_va, end_va);
+        0
     }
 }
 
@@ -201,4 +265,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// yifan 2026/5/14 Increment syscall count for the current task
+pub fn increment_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.increment_syscall_count(syscall_id);
+}
+
+/// yifan 2026/5/14 Get syscall count for the current task
+pub fn get_syscall_count(syscall_id: usize) -> isize {
+    TASK_MANAGER.get_syscall_count(syscall_id)
+}
+
+/// yifan 2026/5/15 mmap
+pub fn mmap(start: usize, len: usize, port: usize) -> isize {
+    TASK_MANAGER.mmap(start, len, port)
+}
+
+/// yifan 2026/5/15 munmap
+pub fn munmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.munmap(start, len)
 }
