@@ -10,6 +10,9 @@ use crate::{
     },
 };
 
+use crate::timer::get_time_us;
+use crate::task;
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -122,7 +125,37 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // yifan 2026/5/27: 首先检查用户缓冲区指针是否为 null；如果是 null，直接返回错误码 -1。
+    if _ts.is_null() {
+        return -1;
+    }
+
+    let token = task::current_user_token(); // yifan 2026/5/27: 获取当前任务的用户地址空间标识 token，用于后续的地址翻译。
+    let ptr = _ts as usize as *const u8; // yifan 2026/5/27: 将用户缓冲区指针 _ts 转换为 usize 再转换为 *const u8，准备进行地址翻译和访问。这里的转换是为了适配 translated_byte_buffer_checked 的参数类型。
+    let len = core::mem::size_of::<TimeVal>(); // yifan 2026/5/27: 计算 TimeVal 结构体的字节长度，作为翻译和访问的范围。
+    // yifan 2026/5/27: 调用 translated_byte_buffer_checked 检查并翻译用户缓冲区地址；如果翻译失败（如地址无效或不可访问），返回错误码 -1。
+    let need_write = true;
+    let mut buffers = match crate::mm::translated_byte_buffer_checked(token, ptr, len, need_write) {
+        Some(bufs) => bufs,
+        None => return -1, // yifan 2026/5/27: 如果用户缓冲区无效或不可访问，返回错误码 -1。
+    };
+
+    // yifan 2026/5/27: 获得时间，创建 TimeVal 结构体。
+    let us = get_time_us();
+    let time = TimeVal {sec: us / 1_000_000, usec: us % 1_000_000};
+
+    // yifan 2026/5/27: 将 TimeVal 结构体变成按字节切片的形式，准备写入用户缓冲区。
+    let time_ptr: *const u8 = &time as *const TimeVal as *const u8;
+    let src: &[u8] = unsafe{ core::slice::from_raw_parts(time_ptr, len) };
+
+    // yifan 2026/5/27: 逐段写入用户缓冲区；buffers 中的每个 buffer 都是用户缓冲区的一段，可能跨页；src 是 TimeVal 的字节表示。
+    let mut used = 0usize;
+    for dst in buffers.iter_mut() {
+        let n = dst.len();
+        dst.copy_from_slice(&src[used..used + n]);
+        used += n;
+    }
+    0
 }
 
 /// YOUR JOB: Implement mmap.

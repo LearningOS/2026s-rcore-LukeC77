@@ -213,3 +213,40 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .unwrap()
         .get_mut()
 }
+
+
+/// Translate a user virtual buffer into kernel-accessible byte slices with permission checks.
+/// Returns `None` if any page is unmapped or lacks required permissions.
+//  yifan 2026/5/13: 此版本函数会检查vpn映射的ppn是否存在，若不存在返回None;若存在但无效或不可读也返回None；只有当映射存在且有效可读时才返回切片Vec。
+pub fn translated_byte_buffer_checked(token: usize, ptr: *const u8, len: usize, need_write: bool) -> Option<Vec<&'static mut [u8]>> {
+    let page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.floor();
+        let pte = page_table.translate(vpn)?;
+        // yifan 2026/5/13: 检查用户页是否具有 U（用户）权限；如果没有，说明该页不属于用户空间，返回 None。
+        if (pte.flags() & PTEFlags::U) == PTEFlags::empty() {
+            return None;
+        }
+        if !pte.is_valid() || !pte.readable() {
+            return None;
+        }
+        if need_write && !pte.writable() {
+            return None;
+        }
+        let ppn = pte.ppn();
+        vpn.step();
+        let mut end_va: VirtAddr = vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.page_offset() == 0 {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
+        }
+        start = end_va.into();
+    }
+    Some(v)
+}
