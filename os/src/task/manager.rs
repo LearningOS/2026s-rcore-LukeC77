@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 use lazy_static::*;
 ///A array of `TaskControlBlock` that is thread-safe
 pub struct TaskManager {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
+    ready_queue: VecDeque<Arc<TaskControlBlock>>,    // yifan 2026/5/23: 就绪队列使用 VecDeque 实现 FIFO（push_back/pop_front）；元素为 Arc<TCB> 以共享所有权，避免任务在调度前被提前释放。
 }
 
 /// A simple FIFO scheduler.

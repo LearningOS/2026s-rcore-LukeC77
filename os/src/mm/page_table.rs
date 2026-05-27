@@ -185,22 +185,22 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
 
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
 pub fn translated_str(token: usize, ptr: *const u8) -> String {
-    let page_table = PageTable::from_token(token);
-    let mut string = String::new();
-    let mut va = ptr as usize;
-    loop {
+    let page_table = PageTable::from_token(token);    // yifan 2026/5/26: 用用户进程页表 token 构造页表对象，后续按该地址空间做 VA->PA 翻译。
+    let mut string = String::new();    // yifan 2026/5/26: 初始化内核侧 String，用于累积从用户态读取到的字符。
+    let mut va = ptr as usize;    // yifan 2026/5/26: 从用户传入的 char* 起始虚拟地址开始逐字节读取。
+    loop {    // yifan 2026/5/26: 循环逐字节读取，直到遇到 '\0' 终止符。
         let ch: u8 = *(page_table
             .translate_va(VirtAddr::from(va))
             .unwrap()
-            .get_mut());
-        if ch == 0 {
+            .get_mut());    // yifan 2026/5/26: 每次先通过页表翻译当前用户虚拟地址再取字节，可跨页读取；unwrap 表示未映射地址会 panic。
+        if ch == 0 {    // yifan 2026/5/26: ch == 0 时停止读取（C 字符串结束）。
             break;
         } else {
-            string.push(ch as char);
-            va += 1;
+            string.push(ch as char);    // yifan 2026/5/26: 将非 '\0' 字节转换为字符后追加到返回字符串。
+            va += 1;    // yifan 2026/5/26: 地址加一，继续读取下一个字节。
         }
     }
-    string
+    string    // yifan 2026/5/26: 返回构造完成的内核 String（不包含终止符 '\0'）。
 }
 /// Translate a ptr[u8] array through page table and return a mutable reference of T
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {

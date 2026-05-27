@@ -84,10 +84,10 @@ impl MemorySet {
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
-        self.page_table.map(
-            VirtAddr::from(TRAMPOLINE).into(),
-            PhysAddr::from(strampoline as usize).into(),
-            PTEFlags::R | PTEFlags::X,
+        self.page_table.map(    // yifan 2026/5/26: 调用页表映射接口，建立 trampoline 的页表项。
+            VirtAddr::from(TRAMPOLINE).into(),    // yifan 2026/5/26: 映射目标虚拟地址为固定 TRAMPOLINE 高地址（转换为 VPN）。
+            PhysAddr::from(strampoline as usize).into(),    // yifan 2026/5/26: 映射源物理地址为内核 trampoline 代码符号 strampoline（转换为 PPN）。
+            PTEFlags::R | PTEFlags::X,    // yifan 2026/5/26: 权限设置为可读+可执行，不可写。
         );
     }
     /// Without kernel stacks.
@@ -235,23 +235,23 @@ impl MemorySet {
     }
     /// Create a new address space by copy code&data from a exited process's address space.
     pub fn from_existed_user(user_space: &Self) -> Self {
-        let mut memory_set = Self::new_bare();
+        let mut memory_set = Self::new_bare();    // yifan 2026/5/26: 新建空地址空间（空页表与空 areas），作为子进程地址空间骨架。
         // map trampoline
-        memory_set.map_trampoline();
+        memory_set.map_trampoline();    // yifan 2026/5/26: 先映射 trampoline，保证 trap 进入/返回路径可用。这是因为我们解析 ELF 创建地址空间的时候，并没有将跳板页作为一个单独的逻辑段插入到地址空间的逻辑段向量 areas 中，所以这里需要单独映射上。
         // copy data sections/trap_context/user_stack
-        for area in user_space.areas.iter() {
-            let new_area = MapArea::from_another(area);
-            memory_set.push(new_area, None);
+        for area in user_space.areas.iter() {    // yifan 2026/5/26: 遍历父进程每个 MapArea（代码段/数据段/用户栈/trap context 等）。
+            let new_area = MapArea::from_another(area);    // yifan 2026/5/26: 复制区域元信息（VPN 范围、映射类型、权限），不复制物理帧。
+            memory_set.push(new_area, None);    // yifan 2026/5/26: 将区域加入新地址空间并建立映射；Framed 区域会为子进程分配新物理页。
             // copy data from another space
-            for vpn in area.vpn_range {
-                let src_ppn = user_space.translate(vpn).unwrap().ppn();
-                let dst_ppn = memory_set.translate(vpn).unwrap().ppn();
+            for vpn in area.vpn_range {    // yifan 2026/5/26: 按虚拟页逐页复制父进程内容到子进程。
+                let src_ppn = user_space.translate(vpn).unwrap().ppn();    // yifan 2026/5/26: 查询父地址空间该 VPN 对应的物理页号。
+                let dst_ppn = memory_set.translate(vpn).unwrap().ppn();    // yifan 2026/5/26: 查询子地址空间该 VPN 对应的物理页号。
                 dst_ppn
                     .get_bytes_array()
-                    .copy_from_slice(src_ppn.get_bytes_array());
+                    .copy_from_slice(src_ppn.get_bytes_array());    // yifan 2026/5/26: 将父页整页字节拷贝到子页，实现深拷贝而非 COW 共享。
             }
         }
-        memory_set
+        memory_set    // yifan 2026/5/26: 返回构造完成的新用户地址空间（虚拟布局相同、物理页独立）。
     }
     /// Change page table by writing satp CSR Register.
     pub fn activate(&self) {
@@ -304,7 +304,7 @@ impl MemorySet {
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     vpn_range: VPNRange,
-    data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    data_frames: BTreeMap<VirtPageNum, FrameTracker>,    // yifan 2026/5/25: 记录本 MapArea 在 MapType::Framed 下的 VPN -> FrameTracker（物理帧所有权）映射；真正硬件使用的 VPN->PPN 映射在页表中。yifan 2026/5/25: fork 通过 from_existed_user 为子进程重新分配 Framed 页并逐页拷贝数据，因此子进程 data_frames 与父进程不同，不共享同一批物理帧。
     map_type: MapType,
     map_perm: MapPermission,
 }
@@ -327,10 +327,10 @@ impl MapArea {
     }
     pub fn from_another(another: &Self) -> Self {
         Self {
-            vpn_range: VPNRange::new(another.vpn_range.get_start(), another.vpn_range.get_end()),
-            data_frames: BTreeMap::new(),
-            map_type: another.map_type,
-            map_perm: another.map_perm,
+            vpn_range: VPNRange::new(another.vpn_range.get_start(), another.vpn_range.get_end()),    // yifan 2026/5/25: 复制原 MapArea 的虚拟页范围（起始/结束 VPN 一致）。
+            data_frames: BTreeMap::new(),    // yifan 2026/5/25: 不复制原物理帧持有表，新的 MapArea 先为空，后续映射时再建立。
+            map_type: another.map_type,    // yifan 2026/5/25: 复制映射类型（Identical 或 Framed）。
+            map_perm: another.map_perm,    // yifan 2026/5/25: 复制页权限位（R/W/X/U）。
         }
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
