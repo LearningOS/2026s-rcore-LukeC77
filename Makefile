@@ -31,6 +31,9 @@ docker:
 build_docker:
 	docker build -t ${DOCKER_NAME} .
 
+fmt:
+	cd easy-fs; cargo fmt; cd ../easy-fs-fuse cargo fmt; cd ../os ; cargo fmt; cd ../user; cargo fmt; cd ..
+
 attach_docker:
 	@if docker ps -a --filter "name=^/${CONTAINER_NAME}$$" --format "{{.Names}}" | grep -q "${CONTAINER_NAME}"; then \
 		if ! docker ps --filter "name=^/${CONTAINER_NAME}$$" --format "{{.Names}}" | grep -q "${CONTAINER_NAME}"; then \
