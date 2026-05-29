@@ -13,6 +13,11 @@ use crate::{
 use crate::timer::get_time_us;
 use crate::task;
 
+use crate::task::BIG_STRIDE; // yifan 2026/5/28: 引入调度算法相关常量。
+use crate::config::PAGE_SIZE; // yifan 2026/5/29: 引入页大小常量用于地址对齐检查。
+use crate::mm::VirtAddr; // yifan 2026/5/29: 引入虚拟地址类型用于地址范围检查。
+use crate::mm::MapPermission; // yifan 2026/5/29: 引入内存映射权限类型用于权限设置。
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -56,7 +61,7 @@ pub fn sys_fork() -> isize {
 
 pub fn sys_exec(path: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
-    let token = current_user_token();    // yifan 2026/5/26: 获取当前进程用户页表 token，用于翻译用户态传入的 path 指针。
+    let token = current_user_token();    // yifan 2026/5/26: 获取当前进程用户页表 token，用于翻译用户态传入的 path 指针。这是因为path 是用户空间的 C 字符串指针，内核需要通过当前进程的页表来正确访问它。
     let path = translated_str(token, path);    // yifan 2026/5/26: 将用户态 C 字符串路径按页表翻译并拷贝为内核 String。
     if let Some(data) = get_app_data_by_name(path.as_str()) {    // yifan 2026/5/26: 按应用名查找对应 ELF 二进制数据。
         let task = current_task().unwrap();    // yifan 2026/5/26: 取当前任务（exec 语义是替换当前进程，而不是创建新进程）。
@@ -159,21 +164,69 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 }
 
 /// YOUR JOB: Implement mmap.
+/// start 需要映射的虚存起始地址，要求按页对齐
+/// len 映射字节长度，可以为 0
+/// prot：第 0 位表示是否可读，第 1 位表示是否可写，第 2 位表示是否可执行。其他位无效且必须为 0
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_mmap IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _start % PAGE_SIZE != 0 {
+        return -1; // yifan 2026/5/14: 如果 start 地址不是页对齐的，返回错误码 -1。
+    }
+    if _port & 0x7 == 0 {
+        return -1; // yifan 2026/5/14: 如果 prot 参数的最低三位都为0（即没有任何权限），没有意义。
+    }
+    if _port & !0x7 != 0 {
+        return -1; // yifan 2026/5/14: 其他位无效且必须为 0
+    }
+    
+    let task = current_task().unwrap(); // yifan 2026/5/29: 获取当前任务，准备访问其内存空间信息以检查映射冲突。
+    let mut inner = task.inner_exclusive_access(); // yifan 2026/5/29: 独占访问当前任务的内部状态，准备检查内存映射冲突。
+    let memory_set = &mut inner.memory_set;
+    let start_va = VirtAddr(_start);
+    let end_va = VirtAddr(_start + _len);
+    if memory_set.overlap(start_va, end_va) {
+        return -1; // yifan 2026/5/15: 如果要映射的虚拟地址区间与当前内存空间已有的映射存在重叠，返回错误码 -1。
+    }
+    let mut perm = MapPermission::U;
+    if _port & 0b1 != 0 { // 可读
+        perm |= MapPermission::R;
+    }
+    if _port & 0b10 != 0 { // 可写
+        perm |= MapPermission::W;
+    }
+    if _port & 0b100 != 0 { // 可执行
+        perm |= MapPermission::X;
+    }
+    memory_set.insert_framed_area(start_va, end_va, perm);
+    0
+
 }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_munmap IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _start % PAGE_SIZE != 0 {
+        return -1; // yifan 2026/5/16 如果start 地址不是也对齐，返回错误码 -1。
+    }
+    // task::munmap(_start, _len) as isize
+    let task = current_task().unwrap(); // yifan 2026/5/29: 获取当前任务，准备访问其内存空间信息以检查映射区间。
+    let mut inner = task.inner_exclusive_access(); // yifan 2026/5/29: 独占访问当前任务的内部状态，准备检查内存映射区间。
+    let memory_set = &mut inner.memory_set;
+    let start_va = VirtAddr(_start);
+    let end_va = VirtAddr(_start + _len);
+
+    if !memory_set.full_mapped(start_va, end_va) {
+        return -1; // yifan 2026/5/15: 如果要解除映射的虚拟地址区间不是当前内存空间已有的映射的子区间，返回错误码 -1。
+    }
+
+    memory_set.unmap(start_va, end_va);
+    0
 }
 
 /// change data segment size
@@ -190,10 +243,23 @@ pub fn sys_sbrk(size: i32) -> isize {
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_spawn IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();    // yifan 2026/5/27: 获取当前进程用户页表 token，用于翻译用户态传入的 path 指针。这是因为path 是用户空间的 C 字符串指针，内核需要通过当前进程的页表来正确访问它。
+    let path = translated_str(token, _path);    // yifan 2026/5/27: 将用户态 C 字符串路径按页表翻译并拷贝为内核 String。
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let new_task = Arc::new(task::TaskControlBlock::new(data)); // yifan 2026/5/27: 创建新任务，加载 ELF 二进制数据到新任务地址空间，并准备好返回用户态的现场。与 fork 不同，spawn 不复制父进程地址空间，而是直接加载新程序。
+        let new_pid = new_task.pid.0;
+        let parent = current_task().unwrap();
+        let mut parent_inner = parent.inner_exclusive_access(); // yifan 2026/5/27: 获取当前任务的内部可变访问，准备读取父进程信息并创建子进程。
+        parent_inner.children.push(new_task.clone()); // yifan 2026/5/27: 将新任务加入父进程的 children 列表，建立父子关系。
+        new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&parent)); // yifan 2026/5/27: 在新任务内部记录父进程的弱引用，方便后续父进程 wait 时找到子进程。
+        add_task(new_task); // yifan 2026/5/27: 将新任务加入调度器，等待调度执行。这里new_task被move了，所以不再使用它了。
+        new_pid as isize // yifan 2026/5/27: 返回新创建子进程的 PID，表示 spawn 成功。
+    } else {
+        -1 // yifan 2026/5/27: 返回 -1 表示未找到目标应用（spawn 失败）。
+    }
 }
 
 // YOUR JOB: Set task priority.
@@ -202,5 +268,12 @@ pub fn sys_set_priority(_prio: isize) -> isize {
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _prio <= 1 {
+        return -1; // yifan 2026/5/28: 优先级数值必须大于 1，返回 -1 表示无效优先级。
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.priority = _prio as usize; // yifan 2026/5/28: 设置当前任务的优先级字段，供后续调度算法使用。
+    inner.pass = BIG_STRIDE / inner.priority; // yifan 2026/5/28: 根据新的优先级计算 pass 值，供 stride 调度算法使用。
+    _prio // yifan 2026/5/28: 返回设置的优先级数值，表示成功。
 }

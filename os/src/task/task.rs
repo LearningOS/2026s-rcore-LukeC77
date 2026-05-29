@@ -8,6 +8,7 @@ use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use super::manager::BIG_STRIDE; // yifan 2026/5/28: 引入调度算法相关常量，供 TCB 内字段初始化使用。
 
 /// Task control block structure
 ///
@@ -68,6 +69,13 @@ pub struct TaskControlBlockInner {    // yifan 2026/5/23: PCB 可变核心字段
 
     /// Program break
     pub program_brk: usize,    // yifan 2026/5/23: 当前 program break，随 sbrk/brk 调整而变化。
+
+    pub stride: usize,    // yifan 2026/5/28: 进程 stride 值，表示该进程当前已经运行的“长度”。
+
+    pub priority: usize,   // yifan 2026/5/28: 进程优先级数值。
+
+    pub pass: usize,   // yifan 2026/5/28: 进程 pass 值，pass = BIG_STRIDE / priority，表示对应进程在调度后，stride 需要进行的累加值。
+
 }
 
 impl TaskControlBlockInner {
@@ -128,6 +136,9 @@ impl TaskControlBlock {
                     exit_code: 0,    // yifan 2026/5/25: 退出码初始为 0
                     heap_bottom: user_sp,    // yifan 2026/5/25: 堆底初始设为用户栈顶位置对应边界
                     program_brk: user_sp,    // yifan 2026/5/25: 程序 break 初始值与 heap_bottom 一致，供后续堆扩展
+                    stride: 0,    // yifan 2026/5/28: 新建任务初始 stride 为 0，表示尚未运行过
+                    priority: 16,    // yifan 2026/5/28: 新建任务默认优先级设为 16（范围 1-256），供后续调度算法使用；实际值可根据需要调整。
+                    pass: BIG_STRIDE / 16,    // yifan 2026/5/28: 根据默认优先级计算初始 pass 值，供 stride 调度算法使用；实际计算可根据调度算法设计调整。
                 })
             },
         };
@@ -203,6 +214,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,    // yifan 2026/5/26: 继承的是堆边界虚拟地址数值而非父进程地址空间引用；子进程已有独立 memory_set，故不会指向父进程物理页。
                     program_brk: parent_inner.program_brk,    // yifan 2026/5/26: 继承当前 brk 仅保持 fork 后堆区间语义一致；相同 VA 在父子中可映射到不同物理页（本实现为深拷贝而非 COW）。
+                    stride: 0,    // yifan 2026/5/28: 新建子进程初始 stride 为 0，表示尚未运行过。
+                    priority: 16,    // yifan 2026/5/28: 新建子进程默认优先级设为 16（范围 1-256），供后续调度算法使用；实际值可根据需要调整。
+                    pass: BIG_STRIDE / 16,    // yifan 2026/5/28: 根据默认优先级计算初始 pass 值。
                 })
             },
         });
