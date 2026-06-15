@@ -159,17 +159,17 @@ impl MemorySet {
             ),
             None,
         );
-        info!("mapping memory-mapped registers");
-        for pair in MMIO {
-            memory_set.push(
-                MapArea::new(
-                    (*pair).0.into(),
-                    ((*pair).0 + (*pair).1).into(),
-                    MapType::Identical,
-                    MapPermission::R | MapPermission::W,
+        info!("mapping memory-mapped registers");    // yifan 2026/6/14: 下面开始把所有 MMIO 设备寄存器所在的物理地址区间映射到内核地址空间。
+        for pair in MMIO {    // yifan 2026/6/14: 遍历 MMIO 中定义的每一个设备地址区间，其中每个 pair 都是 (base, len)。
+            memory_set.push(    // yifan 2026/6/14: 把当前这段 MMIO 区间作为一个新的映射区域加入到内核的地址空间。
+                MapArea::new(    // yifan 2026/6/14: 创建一个新的映射区域，下面四个参数分别指定起始地址、结束地址、映射方式和权限。
+                    (*pair).0.into(),    // yifan 2026/6/14: pair.0 是这段 MMIO 的起始物理地址，这里把它作为映射区间的起点。
+                    ((*pair).0 + (*pair).1).into(),    // yifan 2026/6/14: pair.1 是这段 MMIO 的长度，所以结束地址是 base + len，对应区间 [base, base + len)。
+                    MapType::Identical,    // yifan 2026/6/14: 使用恒等映射，表示虚拟地址和物理地址相同，便于内核直接访问设备寄存器。
+                    MapPermission::R | MapPermission::W,    // yifan 2026/6/14: 设备寄存器通常需要读写，因此这里只赋予读写权限，不赋予执行权限。
                 ),
-                None,
-            );
+                None,    // yifan 2026/6/14: 这里不需要额外拷贝初始化数据，因为 MMIO 映射的是设备寄存器而不是普通内存内容。
+            );    // yifan 2026/6/14: 如果不把这些 MMIO 地址映射进页表，内核访问设备寄存器时就会触发页异常。
         }
         memory_set
     }
@@ -318,6 +318,120 @@ impl MemorySet {
             false
         }
     }
+
+    /// yifan 2026/5/15 为sys_mmap写的方法，检查是否内存已经映射
+    pub fn overlap(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        // 映射的范围是[start_vpn, end_vpn)，所以当 area 的 vpn_range 在 end_vpn 之前或者在 start_vpn 之后时才不重叠
+        for area in self.areas.iter() {
+            let area_l = area.vpn_range.get_start();
+            let area_r = area.vpn_range.get_end();
+            if area_l >= end_vpn || area_r <= start_vpn{
+                continue;
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+
+    /// yifan 2026/5/15 为sys_munmap写的方法，检查是否内存已经映射
+    pub fn full_mapped(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            let pte = self.translate(vpn);
+            let mut mapped = false;
+            if pte.is_some() && pte.unwrap().is_valid() {
+                mapped = true;
+            }
+            trace!("full_mapped check vpn={:?} mapped={}", vpn, mapped);
+            if !mapped {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// yifan 2026/5/15 为sys_munmap写的方法, 取消映射并回收物理页帧
+    pub fn unmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut v: Vec<VPNRange> = Vec::new();
+        let (areas, page_table) = (&mut self.areas, &mut self.page_table);
+
+        //遍历areas，找到与[start_vpn, end_vpn)重叠的部分，记录在vec中
+        for area in areas.iter() {
+            let area_l = area.vpn_range.get_start();
+            let area_r = area.vpn_range.get_end();
+            if area_l >= end_vpn || area_r <= start_vpn { // 不重叠
+                v.push(VPNRange::new(area_l, area_l)); // 不重叠的部分记录为一个空区间，后续遍历vec时会跳过
+            } else if area_l >= start_vpn && area_r <= end_vpn { // 完全重叠
+                v.push(VPNRange::new(area_l, area_r));
+            } else if area_l >= start_vpn && area_r > end_vpn { // 左边界重叠
+                v.push(VPNRange::new(area_l, end_vpn));
+            } else if area_l < start_vpn && area_r <= end_vpn { // 右边界重叠
+                v.push(VPNRange::new(start_vpn, area_r));
+            } else { // 中间重叠: area_l < start_vpn && area_r > end_vpn
+                v.push(VPNRange::new(start_vpn, end_vpn));
+            }
+        }
+
+        // 记录需要取消映射的区间的索引，之后统一从后向前删除
+        let mut delete_indices: Vec<usize> = Vec::new();
+        //遍历vec，取消映射
+        for (i, range) in v.iter().enumerate() {
+            let new_l = range.get_start();
+            let new_r = range.get_end();
+            if new_l == new_r { // 空区间，跳过
+                continue;
+            }
+            
+            let area_l = areas[i].vpn_range.get_start();
+            let area_r = areas[i].vpn_range.get_end();
+            
+            if area_l == new_l && area_r == new_r { // 完全重叠，直接删除
+                areas[i].unmap(page_table);
+                //暂时不删除vector中的areas[i]，否则后续遍历会出问题。可以先做标记，最后统一删除
+                delete_indices.push(i);
+            } else if area_l == new_l && area_r > new_r { // 左边界重叠，修改左边界，保留右边界
+                for vpn in VPNRange::new(area_l, new_r) {
+                    areas[i].unmap_one(page_table, vpn);
+                }
+                areas[i].vpn_range = VPNRange::new(new_r, area_r);
+            } else if area_l < new_l && area_r == new_r { // 右边界重叠，修改右边界，保留左边界
+                areas[i].shrink_to(page_table, new_l);
+            } else { // 中间重叠: area_l < new_l && area_r > new_r, 修改右边界，保留左边界
+                let right_data_frames = areas[i].data_frames.split_off(&new_r); // 将右边界之后的映射关系分离出来，保存在right_data_frames中
+                let _mid_data_frames = areas[i].data_frames.split_off(&new_l); // 将中间区间的映射关系分离出来，保存在mid_data_frames中, 同时也将左侧区间的映射关系保留在areas[i].data_frames中
+                // 取消[new_l, new_r)的映射关系
+                for vpn in VPNRange::new(new_l, new_r) {
+                    areas[i].unmap_one(page_table, vpn);
+                }
+                // 修改原区间的右边界，保留左边界
+                areas[i].vpn_range = VPNRange::new(area_l, new_l);
+                // 将右边界之后的映射关系重新插入到areas中
+                let map_type = areas[i].map_type;
+                let map_perm = areas[i].map_perm;
+                areas.push(MapArea {
+                    vpn_range: VPNRange::new(new_r, area_r),
+                    data_frames: right_data_frames,
+                    map_type,
+                    map_perm,
+                });
+            }
+        }
+
+        // 从后向前删除完全重叠的区间，避免索引问题
+        for i in delete_indices.iter().rev() {
+            areas.remove(*i);
+        }
+
+
+    }
+    
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

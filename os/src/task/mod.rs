@@ -31,7 +31,7 @@ use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-pub use manager::add_task;
+pub use manager::{add_task, BIG_STRIDE}; // yifan 2026/5/28: 从 manager 模块引入 BIG_STRIDE 常量，用于调度算法中计算每个任务的 pass 值。
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
     Processor,
@@ -104,15 +104,15 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     schedule(&mut _unused as *mut _);
 }
 
-lazy_static! {
+lazy_static! {    // yifan 2026/6/15: 这里用 lazy_static 定义延迟初始化的全局静态对象，因为 INITPROC 的创建需要运行时打开文件、读取程序内容并构造进程控制块。
     /// Creation of initial process
     ///
     /// the name "initproc" may be changed to any other app name like "usertests",
     /// but we have user_shell, so we don't need to change it.
-    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new({
-        let inode = open_file("ch6b_initproc", OpenFlags::RDONLY).unwrap();
-        let v = inode.read_all();
-        TaskControlBlock::new(v.as_slice())
+    pub static ref INITPROC: Arc<TaskControlBlock> = Arc::new({    // yifan 2026/6/15: INITPROC 表示系统启动后最先准备好的初始用户进程，全局用 Arc 共享它的进程控制块。
+        let inode = open_file("ch6b_initproc", OpenFlags::RDONLY).unwrap();    // yifan 2026/6/15: 先从文件系统中以只读方式打开名为 ch6b_initproc 的应用程序文件，因为这里只需要读取它的程序镜像。
+        let v = inode.read_all();    // yifan 2026/6/15: 把这个应用文件的全部内容读出来，得到完整的可执行文件字节数据。
+        TaskControlBlock::new(v.as_slice())    // yifan 2026/6/15: 再用这些程序字节创建一个新的进程控制块，从而把磁盘上的应用变成内核中的可运行进程对象。
     });
 }
 

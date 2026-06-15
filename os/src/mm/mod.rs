@@ -20,8 +20,8 @@ pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
 use page_table::PTEFlags;
 pub use page_table::{
     translated_byte_buffer, translated_ref, translated_refmut, translated_str, PageTable,
-    PageTableEntry, UserBuffer, UserBufferIterator,
-};
+    PageTableEntry, UserBuffer, UserBufferIterator, translated_byte_buffer_checked
+}; // yifan 2026/5/27: 新增 translated_byte_buffer_checked 用于 sys_get_time 中安全访问用户缓冲区。
 
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {

@@ -10,6 +10,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use super::manager::BIG_STRIDE; // yifan 2026/5/28: 引入调度算法相关常量，供 TCB 内字段初始化使用。
 
 /// Task control block structure
 ///
@@ -64,13 +65,32 @@ pub struct TaskControlBlockInner {
 
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
-    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    /// yifan 2026/6/15
+    /// - Vec 的动态长度特性使得我们无需设置一个固定的文件描述符数量上限，我们可以更加灵
+    /// 活的使用内存，而不必操心内存管理问题；
+    /// - Option 使得我们可以区分一个文件描述符当前是否空闲，当它是 None 的时候是空闲的，
+    /// 而 Some 则代表它已被占用；
+    /// - Arc 首先提供了共享引用能力。后面我们会提到，可能会有多个进程共享同一个文件对
+    /// 它进行读写。此外被它包裹的内容会被放到内核堆而不是栈上，于是它便不需要在编译期
+    /// 有着确定的大小；
+    /// - dyn 关键字表明 Arc 里面的类型实现了 File/Send/Sync 三个 Trait ，
+    /// 但是编译期无法知道它具体是哪个类型（可能是任何实现了 File Trait 的类型如 
+    /// Stdin/Stdout ，故而它所占的空间大小自然也无法确定），需要等到运行时才能知道它
+    /// 的具体类型，对于一些抽象方法的调用也是在那个时候才能找到该类型实现的方法并跳转
+    /// 过去。
+    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>, 
 
     /// Heap bottom
     pub heap_bottom: usize,
 
     /// Program break
     pub program_brk: usize,
+
+    pub stride: usize,    // yifan 2026/5/28: 进程 stride 值，表示该进程当前已经运行的“长度”。
+
+    pub priority: usize,   // yifan 2026/5/28: 进程优先级数值。
+
+    pub pass: usize,   // yifan 2026/5/28: 进程 pass 值，pass = BIG_STRIDE / priority，表示对应进程在调度后，stride 需要进行的累加值。
 }
 
 impl TaskControlBlockInner {
@@ -135,6 +155,9 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    stride: 0,    // yifan 2026/5/28: 新建任务初始 stride 为 0，表示尚未运行过
+                    priority: 16,    // yifan 2026/5/28: 新建任务默认优先级设为 16（范围 1-256），供后续调度算法使用；实际值可根据需要调整。
+                    pass: BIG_STRIDE / 16,    // yifan 2026/5/28: 根据默认优先级计算初始 pass 值，供 stride 调度算法使用；实际计算可根据调度算法设计调整。
                 })
             },
         };
@@ -216,6 +239,9 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    stride: 0,    // yifan 2026/5/28: 新建子进程初始 stride 为 0，表示尚未运行过。
+                    priority: 16,    // yifan 2026/5/28: 新建子进程默认优先级设为 16（范围 1-256），供后续调度算法使用；实际值可根据需要调整。
+                    pass: BIG_STRIDE / 16,    // yifan 2026/5/28: 根据默认优先级计算初始 pass 值。
                 })
             },
         });

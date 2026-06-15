@@ -10,12 +10,12 @@ use virtio_drivers::{Hal, VirtIOBlk, VirtIOHeader};
 
 /// The base address of control registers in Virtio_Block device
 #[allow(unused)]
-const VIRTIO0: usize = 0x10001000;
+const VIRTIO0: usize = 0x10001000;    // yifan 2026/6/14: 这是 VirtIO 块设备控制寄存器的 MMIO 基地址，驱动后面会通过访问这段地址与设备通信。
 /// VirtIOBlock device driver strcuture for virtio_blk device
-pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<'static, VirtioHal>>);
+pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<'static, VirtioHal>>);    // yifan 2026/6/14: 这里把 virtio_drivers 提供的 VirtIOBlk 驱动对象包进 UPSafeCell，既复用库里的驱动逻辑，也保证内核能以互斥方式修改设备队列状态。
 
 lazy_static! {
-    static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };
+    static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };    // yifan 2026/6/14: 这是一个全局页帧保存区，用来托管分配给 VirtIO 队列的 DMA 页，避免这些 FrameTracker 在函数返回后被释放而导致设备仍在使用的内存失效。
 }
 
 impl BlockDevice for VirtIOBlock {
