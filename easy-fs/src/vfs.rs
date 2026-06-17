@@ -13,6 +13,7 @@ pub struct Inode {
     block_offset: usize, // yifan 2026/6/6: 表示这个 DiskInode 在该磁盘块内的偏移量。因为一个磁盘块可以保存多个 DiskInode。
     fs: Arc<Mutex<EasyFileSystem>>, // yifan 2026/6/6:  fs 是指向 EasyFileSystem 的一个指针，因为对 Inode 的种种操作实际上都是要通过底层的文件系统来完成。
     block_device: Arc<dyn BlockDevice>, // yifan 2026/6/6:表示底层块设备。因为 Inode 最终要读写磁盘块，所以需要能访问块设备。
+    inode_id: u32, // yifan 2026/6/16: inode_id 是这个 Inode 对应的磁盘 inode 编号，后续在实现 get_stat 时需要用它来填充 Stat 结构体中的 ino 字段。
 }
 
 impl Inode {
@@ -22,12 +23,14 @@ impl Inode {
         block_offset: usize,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
+        inode_id: u32, // yifan 2026/6/16
     ) -> Self {
         Self {
             block_id: block_id as usize,
             block_offset,
             fs,
             block_device,
+            inode_id, // yifan 2026/6/16
         }
     }
     /// Call a function over a disk inode to read it
@@ -86,6 +89,7 @@ impl Inode {
                     block_offset,    // yifan 2026/6/7: 目标 inode 在该逻辑块内的字节偏移。
                     self.fs.clone(),    // yifan 2026/6/7: 共享同一个 EasyFileSystem 实例，使返回的 Inode 句柄后续仍能访问整个文件系统。
                     self.block_device.clone(),    // yifan 2026/6/7: 复制底层块设备指针，使返回的 Inode 句柄后续可以继续读写对应的磁盘块。
+                    inode_id,    // yifan 2026/6/16: 设置 inode_id，使返回的 Inode 句柄可以在 get_stat 时使用。
                 ))
             })
         })
@@ -108,6 +112,9 @@ impl Inode {
         disk_inode.increase_size(new_size, v, &self.block_device);
     }
     /// Create inode under current inode by name
+    /// yifan 2026/6/17: 在当前目录下创建一个新文件；如果成功就返回新文件对应的 Inode 句柄，否则返回 None。
+    /// 因为本项目的 easy-fs 设计中，只有根目录 Inode 才会调用这个方法，所以这里的 self 实际上是根目录 Inode。
+    /// 而op闭包中的root_inode是调用这个方法的Inode对应的DiskInode，也就是根目录的inode。
     pub fn create(&self, name: &str) -> Option<Arc<Inode>> {
         let mut fs = self.fs.lock();
         let op = |root_inode: &DiskInode| {    // yifan 2026/6/7: 定义一个闭包 op，它接收当前目录对应的 DiskInode 作为参数；后面会把这个闭包传给 read_disk_inode(op)，让 read_disk_inode 先读出当前 inode 的磁盘内容，再交给这个闭包处理。
@@ -154,6 +161,7 @@ impl Inode {
             block_offset,    // yifan 2026/6/8: 新文件对应的 DiskInode 在该逻辑块内的字节偏移。
             self.fs.clone(),    // yifan 2026/6/8: 让返回的 Inode 继续共享同一个 EasyFileSystem 实例，后续可以继续访问整个文件系统。
             self.block_device.clone(),    // yifan 2026/6/8: 复制底层块设备指针，使返回的 Inode 句柄后续仍能通过块设备读写自己的数据。
+            new_inode_id,    // yifan 2026/6/16: 设置 inode_id，使返回的 Inode 句柄可以在 get_stat 时使用。
         )))
         // release efs lock automatically by compiler
     }
@@ -201,5 +209,83 @@ impl Inode {
             }
         });
         block_cache_sync_all();    // yifan 2026/6/8: 将前面对 inode 和数据块回收状态的修改统一刷回块设备，确保清空操作真正生效。
+    }
+
+    /// yifan 2026/6/16: get inode id
+    pub fn inode_id(&self) -> u32 {
+        self.inode_id
+    }
+
+    /// yifan 2026/6/16: 判断为目录
+    pub fn is_dir(&self) -> bool {
+        self.read_disk_inode(|disk_inode| disk_inode.is_dir())
+    }
+
+    /// yifan 2026/6/16: 判断为文件
+    pub fn is_file(&self) -> bool {
+        self.read_disk_inode(|disk_inode| disk_inode.is_file())
+    }
+
+    /// yifan 2026/6/16: set nlink
+    pub fn set_nlink(&self, nlink: u32) {
+        self.modify_disk_inode(|disk_inode| disk_inode.set_nlink(nlink));
+        // block_cache_sync_all(); // 这里先不做磁盘同步，较少开销。在调用set_nlink的函数中做同步。
+    }
+
+    /// yifan 2026/6/16: get nlink
+    pub fn get_nlink(&self) -> u32 {
+        self.read_disk_inode(|disk_inode| disk_inode.nlink())
+    }
+
+    /// yifan 2026/6/17: bind new path to current inode, 只有root node会调用
+    pub fn link(&self, old_name: &str, new_name: &str) -> bool {
+        if let Some(inode_id) = self.find(old_name) { // yifan 2026/6/17: 先在当前目录下查找 old_name 对应的 inode；如果找不到就返回false，表示 link 失败。
+            let mut fs = self.fs.lock();
+            // yifan 2026/6/17: 在当前目录下创建一个新的目录项，名字是 new_name，指向目标 inode 编号 target_inode；不考虑_new_name已经存在的情况。
+            self.modify_disk_inode(|root_inode| {    
+                // append file in the dirent
+                let file_count = (root_inode.size as usize) / DIRENT_SZ;    
+                let new_size = (file_count + 1) * DIRENT_SZ;    
+                // increase size
+                self.increase_size(new_size as u32, root_inode, &mut fs);    
+                // write dirent
+                let dirent = DirEntry::new(new_name, inode_id.inode_id());    
+                root_inode.write_at(
+                    file_count * DIRENT_SZ,    
+                    dirent.as_bytes(),    
+                    &self.block_device,    
+                );
+            });
+
+            // yifan 2026/6/17: 更新target_inode的nlink字段，表示又多了一个名字指向它了。
+            let current_nlink = inode_id.get_nlink();
+            inode_id.set_nlink(current_nlink + 1); // yifan 2026/6/17: 先获取当前 nlink 的值，然后加 1 后再设置
+
+            block_cache_sync_all(); // yifan 2026/6/17: 将前面通过块缓存完成的修改统一刷回块设备，包括目录项的追加以及可能发生的目录扩容。
+            true
+
+        } else {
+            false
+        }
+    }
+
+    /// yifan 2026/6/18: unlink a path from current inode, 只有root node会调用
+    pub fn unlink(&self, name:&str) -> bool {
+        if let Some(inode_id) = self.find(name) {
+            let mut fs = self.fs.lock();
+            if (inode_id.get_nlink() == 1) {
+                // yifan 2026/6/18: 如果nlink为1，直接清空inode内容并回收数据块
+                inode_id.clear();
+            } else {
+                // yifan 2026/6/18: 如果nlink大于1，只需要把nlink减1即可
+                let current_nlink = inode_id.get_nlink();
+                inode_id.set_nlink(current_nlink - 1);
+                block_cache_sync_all(); // yifan 2026/6/18: 将前面通过块缓存完成的修改统一刷回块设备，包括nlink的修改。
+            }
+
+            true
+        } else {
+            false
+        }
     }
 }

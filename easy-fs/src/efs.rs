@@ -123,7 +123,7 @@ impl EasyFileSystem {
         // acquire efs lock temporarily
         let (block_id, block_offset) = efs.lock().get_disk_inode_pos(0);
         // release efs lock
-        Inode::new(block_id, block_offset, Arc::clone(efs), block_device)
+        Inode::new(block_id, block_offset, Arc::clone(efs), block_device, 0)    // yifan 2026/6/16: 这里传入 inode_id=0，因为根目录的 inode 编号就是 0，后续在实现 get_stat 时需要用它来填充 Stat 结构体中的 ino 字段。
     }
     /// Get inode by id
     /// 根据 inode 编号，计算这个 DiskInode 存放在哪个磁盘块中，以及在这个块内的偏移量是多少。

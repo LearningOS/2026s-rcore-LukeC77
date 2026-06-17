@@ -1,5 +1,6 @@
 //!Stdin & Stdout
 use super::File;
+use super::{Stat, StatMode};// yifan 2026/6/16: 引入 Stat 和 StatMode 结构体，因为后续在实现 File trait 的 get_stat 方法时需要用到它们来构造返回的 Stat 信息。
 use crate::mm::UserBuffer;
 use crate::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
@@ -39,6 +40,11 @@ impl File for Stdin {
     fn write(&self, _user_buf: UserBuffer) -> usize {
         panic!("Cannot write to stdin!");
     }
+
+    //yifan 2026/6/16: stdin的get_stat方法，只是一个placeholder
+    fn get_stat(&self) -> Stat {
+        Stat::new(0, StatMode::NULL, 1)
+    }
 }
 
 impl File for Stdout {
@@ -56,5 +62,9 @@ impl File for Stdout {
             print!("{}", core::str::from_utf8(*buffer).unwrap());
         }
         user_buf.len()
+    }
+    //yifan 2026/6/16: stdout的get_stat方法，只是一个placeholder
+    fn get_stat(&self) -> Stat {
+        Stat::new(0, StatMode::NULL, 1)
     }
 }

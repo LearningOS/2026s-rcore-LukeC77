@@ -5,6 +5,7 @@
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
 use super::File;
+use super::{Stat, StatMode};// yifan 2026/6/16: 引入 Stat 和 StatMode 结构体，因为后续在实现 File trait 的 get_stat 方法时需要用到它们来构造返回的 Stat 信息。
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -56,6 +57,7 @@ impl OSInode {
 }
 
 lazy_static! {    // yifan 2026/6/15: 这里用 lazy_static 定义延迟初始化的全局静态对象，因为初始化 ROOT_INODE 需要运行时打开文件系统并访问块设备，无法写成普通 static 常量。
+    /// Global root inode of the filesystem. // yifan 2026/6/17: 因为ROOT_INODE需要在 sys_linkat 中访问，所以它必须是全局可访问的静态对象。需要文档注释了。
     pub static ref ROOT_INODE: Arc<Inode> = {    // yifan 2026/6/15: ROOT_INODE 表示全局共享的根目录 inode，后续列目录、查找文件和创建文件都会从这个入口开始。
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());    // yifan 2026/6/15: 先基于底层块设备 BLOCK_DEVICE 打开整个 EasyFileSystem 文件系统，得到文件系统管理对象 efs。
         Arc::new(EasyFileSystem::root_inode(&efs))    // yifan 2026/6/15: 再从 efs 中取出根目录对应的 inode，并用 Arc 包装成可共享的全局对象返回。
@@ -155,5 +157,19 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+
+    // yifan 2026/6/16: 这个函数的作用是根据当前打开文件对象的底层 inode 获取它的 stat 信息，并返回一个 Stat 结构体。Stat 结构体包含了文件所在设备号、inode 号、文件类型和权限、硬链接数量等属性。
+    fn get_stat(&self) -> Stat {
+        let inner = self.inner.exclusive_access();    // yifan 2026/6/16: 先独占访问 OSInodeInner，因为要访问底层 inode 来获取 stat 信息。
+        let inode = inner.inode.clone();    // yifan 2026/6/16: 克隆一份底层 inode 的 Arc，这样即使后面释放 inner，也仍然可以安全地继续使用这个 inode 对象。
+        let ino = inode.inode_id();    // yifan 2026/6/16: 从底层 inode 中取出 inode_id，这个编号在创建 Inode 时就已经设置好了，后续在 get_stat 时直接用它来填充 Stat 结构体中的 ino 字段。
+        let mut mode:StatMode = StatMode::NULL;
+        if inode.is_dir() {
+            mode = StatMode::DIR;
+        } else if inode.is_file() {
+            mode = StatMode::FILE;
+        }
+        Stat::new(ino as u64, mode, inode.get_nlink() as u32)
     }
 }

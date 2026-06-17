@@ -116,6 +116,7 @@ pub struct DiskInode {
     // 一个二级索引块可以保存 128 个一级索引块编号。 每个一级索引块可以索引 64 KiB 文件数据。 所以二级间接索引最多支持：128 * 64 KiB = 8192 KiB = 8 MiB
     pub indirect2: u32,
     type_: DiskInodeType, // yifan 2026/6/2: type_ 表示该 inode 是文件还是目录.
+    nlink: u32, // yifan 2026/6/16: nlink 表示硬链接数量，初始为1，每当有新的硬链接指向这个 inode 时 nlink 就加 1；
 
     // yifan 2026/6/2: indirect1 和 indirect2的区别：
     // 文件增长时先用满 direct，再用 DiskInode.indirect1 指向的那个一级索引块，再用 DiskInode.indirect2 指向的二级索引块。DiskInode.indirect1 是一个单独的一级索引块指针；而 indirect2 指向的二级索引块中保存的是一批额外的一级索引块指针。它们不是重复，而是为了支持更大的文件。
@@ -156,6 +157,7 @@ impl DiskInode {
         self.indirect1 = 0;
         self.indirect2 = 0;
         self.type_ = type_;
+        self.nlink = 1; // yifan 2026/6/16: 初始化 nlink 为 1，因为新创建的文件或目录至少有一个链接（它自己）。
     }
     /// Whether this inode is a directory
     pub fn is_dir(&self) -> bool {
@@ -455,6 +457,16 @@ impl DiskInode {
         }
         write_size    // yifan 2026/6/5: 返回本次实际写入的总字节数。
     }
+
+    /// yifan 2026/6/16: 修改nlink字段
+    pub fn set_nlink(&mut self, nlink: u32) {
+        self.nlink = nlink;
+    }
+
+    /// yifan 2026/6/16: 获取nlink字段
+    pub fn nlink(&self) -> u32 {
+        self.nlink
+    }   
 }
 /// A directory entry
 /// yifan 2026/6/6: DirEntry 不是“目录本身”，而是目录中的一条记录，也就是“目录项”。
@@ -502,4 +514,5 @@ impl DirEntry {
     pub fn inode_id(&self) -> u32 {
         self.inode_id
     }
+    
 }

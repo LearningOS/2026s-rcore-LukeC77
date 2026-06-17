@@ -1,6 +1,6 @@
 //! File and filesystem-related syscalls
-use crate::fs::{open_file, OpenFlags, Stat};
-use crate::mm::{translated_byte_buffer, translated_str, UserBuffer};
+use crate::fs::{open_file, OpenFlags, Stat, ROOT_INODE}; // yifan 2026/6/16: 引入 ROOT_INODE，因为在 sys_linkat 中需要访问根目录 inode 来执行链接操作。
+use crate::mm::{translated_byte_buffer, translated_str, UserBuffer, translated_refmut}; // yifan 2026/6/16: 引入 translated_refmut，因为在 sys_fstat 中需要把 stat 结果写入用户提供的指针地址，这个函数可以安全地把用户虚拟地址翻译成内核可访问的可变引用。
 use crate::task::{current_task, current_user_token};
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {    // yifan 2026/6/15: 这是 write 系统调用在内核中的入口，负责把用户缓冲区中的数据写入 fd 对应的文件对象。
@@ -76,28 +76,75 @@ pub fn sys_close(fd: usize) -> isize {    // yifan 2026/6/15: 这是 close 系�
 }
 
 /// YOUR JOB: Implement fstat.
+/// yifan 2026/6/16: 成功返回0，失败返回-1。
 pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
     trace!(
-        "kernel:pid[{}] sys_fstat NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_fstat IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let task = current_task().unwrap();
+    let inner= task.inner_exclusive_access();
+    if _st.is_null() {
+        return -1; // yifan 2026/6/16: _st 是用户提供的指针，如果它是 null 就说明用户没有提供有效的地址来存放 stat 结果，返回 -1 表示 fstat 失败。
+    }
+    if _fd >= inner.fd_table.len() {
+        return -1; // yifan 2026/6/16: fd 越界时直接返回 -1，表示 fstat 失败。
+    }
+    if inner.fd_table[_fd].is_none() {
+        return -1; // yifan 2026/6/16: 如果对应槽位没有文件对象，同样返回 -1 表示 fstat 失败。
+    }
+
+    // yifan 2026/6/16: 因为fd_table[_fd]是Option<Arc<dyn File + Send + Sync>>，
+    // 这是一个泛型，具体类型不知道。所以增加File的接口，让所有满足File trait都能获得stat信息。
+    let file = inner.fd_table[_fd].as_ref().unwrap().clone(); // yifan 2026/6/16: 先克隆一份文件对象的 Arc，这样即使后面释放 inner，也仍然可以安全地继续使用这个文件对象。
+    // yifan 2026/6/16: 因为inner是一个独占访问的Guard，可以先drop(inner)释放它，避免后面调用 file.get_stat() 时长时间持有 inner。
+    // task 是一个 Arc<TaskControlBlock> 或类似的共享引用，离开作用域后会自动释放。
+    drop(inner);
+    let stat = file.get_stat(); // yifan 2026/6/16: 调用文件对象的 get_stat 方法获取它的 stat 信息.
+
+    // unsafe {
+    //     *_st = stat; 
+    // }
+    // yifan 2026/6/16: 上面这段代码是直接把 stat 结构体写入用户提供的指针地址，但由于 _st 是用户空间的地址，内核不能直接解引用它。需要先把 _st 翻译成内核可访问的地址，然后再写入数据。
+    let token = current_user_token(); // yifan 2026/6/16
+    *translated_refmut(token, _st) = stat; // yifan 2026/6/16: 先把用户指针 _st 翻译成内核可访问的可变引用，然后把 stat 数据写入这个地址。
+
+    0 // yifan 2026/6/16: 返回 0 表示 fstat 成功完成。
 }
 
 /// YOUR JOB: Implement linkat.
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_linkat NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_linkat IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token(); // yifan 2026/6/17: 取得当前用户地址空间对应的页表 token，后面需要用它把用户指针翻译成内核可访问的数据。
+    let old_name = translated_str(token, _old_name);
+    let new_name = translated_str(token, _new_name);
+    if old_name == new_name {
+        return -1; // yifan 2026/6/16: 如果 old_name 和 new_name 是同一个字符串，说明用户试图创建一个链接到自己本身的文件，这在大多数文件系统中是不允许的，返回 -1 表示 linkat 失败。
+    }   
+    //不考虑_new_name已经存在的情况。在link中检查old是否存在。
+    let root_inode = ROOT_INODE.clone(); // yifan 2026/6/17: 克隆一份根目录的 Arc，这样即使后面释放 root_inode，也仍然可以安全地继续使用它。
+    if root_inode.link(old_name.as_str(), new_name.as_str()) {
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement unlinkat.
 pub fn sys_unlinkat(_name: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_unlinkat IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+
+    let token = current_user_token(); // yifan 2026/6/17: 取得当前用户地址空间对应的页表 token。
+    let name = translated_str(token, _name);
+    let root_inode = ROOT_INODE.clone(); // yifan 2026/6/17
+    match root_inode.unlink(name.as_str()) {
+        true => 0,
+        false => -1,
+    }
 }
