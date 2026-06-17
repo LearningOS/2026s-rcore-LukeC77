@@ -467,6 +467,13 @@ impl DiskInode {
     pub fn nlink(&self) -> u32 {
         self.nlink
     }   
+
+    /// yifan 2026/6/18: 减少size
+    pub fn decrease_size(&mut self, new_size: u32) {
+        assert!(new_size <= self.size);
+        self.size = new_size;
+    }
+    
 }
 /// A directory entry
 /// yifan 2026/6/6: DirEntry 不是“目录本身”，而是目录中的一条记录，也就是“目录项”。

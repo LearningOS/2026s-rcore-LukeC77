@@ -272,20 +272,68 @@ impl Inode {
     /// yifan 2026/6/18: unlink a path from current inode, 只有root node会调用
     pub fn unlink(&self, name:&str) -> bool {
         if let Some(inode_id) = self.find(name) {
-            let mut fs = self.fs.lock();
-            if (inode_id.get_nlink() == 1) {
+            if inode_id.get_nlink() == 1 {
                 // yifan 2026/6/18: 如果nlink为1，直接清空inode内容并回收数据块
                 inode_id.clear();
-            } else {
-                // yifan 2026/6/18: 如果nlink大于1，只需要把nlink减1即可
-                let current_nlink = inode_id.get_nlink();
-                inode_id.set_nlink(current_nlink - 1);
-                block_cache_sync_all(); // yifan 2026/6/18: 将前面通过块缓存完成的修改统一刷回块设备，包括nlink的修改。
-            }
+            } 
+            
+            // yifan 2026/6/18: 如果nlink大于1，只需要把nlink减1，删除目录项即可，不需要清空inode内容和回收数据块。
+            let current_nlink = inode_id.get_nlink();
+            inode_id.set_nlink(current_nlink - 1);
 
+            // yifan 2026/6/18: 在当前目录下删除一个目录项，名字是 name。
+            let delete_index = self.read_disk_inode(|root_inde| {
+                self.find_direntry_index(name, root_inde)   // yifan 2026/6/18: 在当前目录下查找要删除的目录项的索引位置；如果找不到就 panic，因为前面 find 已经确认了这个文件存在。
+            });
+            let delete_index = match delete_index {
+                Some(index) => index,
+                None => return false,
+            };
+            self.modify_disk_inode(|root_inode| {    
+                // yifan 2026/6/18: 在当前目录下删除一个目录项，名字是 name，指向目标 inode 编号 target_inode。
+                let file_count = (root_inode.size as usize) / DIRENT_SZ;
+
+                let mut dirent = DirEntry::empty();
+                for i in delete_index + 1..file_count {
+                    // yifan 2026/6/18: 从被删除目录项的下一条开始，依次把后面的目录项往前移动一条位置，覆盖掉被删除的目录项；最后再把目录大小缩小一个目录项的大小。
+                    assert_eq!(
+                        root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),    // yifan 2026/6/18: 从目录 inode 的内容中读取第 i 个目录项；因为目录本质上也是文件，内容是一串连续排列的 DirEntry，所以第 i 项的起始偏移就是 DIRENT_SZ * i，而 dirent.as_bytes_mut() 提供了一个可写字节缓冲区来接收这 32 字节数据。
+                        DIRENT_SZ,    // yifan 2026/6/18: 断言这次读取的字节数必须正好等于一个完整目录项的大小，否则说明没有正确读出一条完整的 DirEntry。
+                    );
+                    assert_eq!(
+                        root_inode.write_at(DIRENT_SZ * (i - 1), dirent.as_bytes(), &self.block_device,),    // yifan 2026/6/18: 把刚读到的目录项写到前一个目录项的位置上，覆盖掉被删除的目录项；偏移 (i - 1) * DIRENT_SZ 表示前一个目录项的位置。
+                        DIRENT_SZ,    // yifan 2026/6/18: 断言这次写入的字节数必须正好等于一条完整目录项的大小，否则说明没有正确写入一条完整的 DirEntry。
+                    );
+                }
+                // yifan 2026/6/18: 最后再把目录大小缩小一个目录项的大小。
+                let new_size = (file_count - 1) * DIRENT_SZ;
+                root_inode.decrease_size(new_size as u32);
+            });
+            block_cache_sync_all(); // yifan 2026/6/18: 将前面通过块缓存完成的修改统一刷回块设备，包括nlink的修改。
+            
             true
         } else {
             false
         }
+    }
+
+    /// yifan 2026/6/18: find direntry index by name, 只有root node会调用
+    pub fn find_direntry_index(&self, name: &str, disk_inode: &DiskInode) ->Option<usize> {
+        // assert it is a directory
+        assert!(disk_inode.is_dir()); 
+        // yifan 2026/6/6: disk_inode.size 表示目录文件的总字节数。目录文件的内容是由一个个 DirEntry 组成的，每个 DirEntry 占用 DIRENT_SZ=32 字节。因此，目录文件的大小除以 DIRENT_SZ 就得到目录项的数量，也就是文件的数量。
+        // 一个block size是512字节，那么一个block里可以存放16个dirent。如果超过16个dirent，就需要DiskInode::increase_size增加目录文件大小。
+        let file_count = (disk_inode.size as usize) / DIRENT_SZ; 
+        let mut dirent = DirEntry::empty();    // yifan 2026/6/7: 先创建一个空的 DirEntry 作为临时缓冲区，用来接收从目录内容中读出的一条目录项。
+        for i in 0..file_count {    // yifan 2026/6/7: 遍历目录中的每一条目录项，i 表示当前是第几个目录项。
+            assert_eq!(
+                disk_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),    // yifan 2026/6/7: 从目录 inode 的内容中读取第 i 个目录项；因为目录本质上也是文件，内容是一串连续排列的 DirEntry，所以第 i 项的起始偏移就是 DIRENT_SZ * i，而 dirent.as_bytes_mut() 提供了一个可写字节缓冲区来接收这 32 字节数据。
+                DIRENT_SZ,    // yifan 2026/6/7: 断言这次读取的字节数必须正好等于一个完整目录项的大小，否则说明没有正确读出一条完整的 DirEntry。
+            );
+            if dirent.name() == name {
+                return Some(i);
+            }
+        }
+        None
     }
 }
