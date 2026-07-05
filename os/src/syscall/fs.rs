@@ -81,16 +81,22 @@ pub fn sys_pipe(pipe: *mut usize) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
     let mut inner = task.inner_exclusive_access();
-    let (pipe_read, pipe_write) = make_pipe();
-    let read_fd = inner.alloc_fd();
-    inner.fd_table[read_fd] = Some(pipe_read);
-    let write_fd = inner.alloc_fd();
-    inner.fd_table[write_fd] = Some(pipe_write);
-    *translated_refmut(token, pipe) = read_fd;
-    *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd;
+    let (pipe_read, pipe_write) = make_pipe();    // yifan 2026/6/21: 这里先创建同一个底层管道缓冲区上的两个端点：一个读端、一个写端；注意此时只是“造出一对端点”，还没有把它们分别交给两个不同进程。
+    let read_fd = inner.alloc_fd();    // yifan 2026/6/21: 先在当前进程自己的 fd_table 里分配一个空闲文件描述符编号，准备用来登记管道读端。
+    inner.fd_table[read_fd] = Some(pipe_read);    // yifan 2026/6/21: 把读端放进当前进程的 fd_table；pipe() 的语义本来就是让调用它的那个进程先同时拿到这对端点，而不是在创建瞬间就自动分给两个不同进程。
+    let write_fd = inner.alloc_fd();    // yifan 2026/6/21: 再次从同一个进程的 fd_table 中分配一个空闲编号，用来登记同一条管道的写端。
+    inner.fd_table[write_fd] = Some(pipe_write);    // yifan 2026/6/21: 把写端也放进当前进程的 fd_table；后续如果这个进程 fork，父子进程会先一起继承这两个端点，再通过 close 把不需要的一端关掉，从而形成“一个进程读、另一个进程写”的最终形态。
+    *translated_refmut(token, pipe) = read_fd;    // yifan 2026/6/21: 把读端对应的 fd 编号写回当前调用进程用户空间中的 pipe[0]；如果后续发生 fork，子进程通常也会在自己对应的用户地址里看到同样的整数值，因为用户地址空间会被复制。
+    *translated_refmut(token, unsafe { pipe.add(1) }) = write_fd;    // yifan 2026/6/21: 把写端对应的 fd 编号写回当前调用进程用户空间中的 pipe[1]；但子进程之所以也能继续使用这两个 fd，关键不只是用户态数组内容被复制了，更重要的是 fork 时内核里的 fd_table 也一起被复制了，因此这两个编号在子进程中仍然对应有效的管道端点。
     0
 }
 
+/// yifan 2026/6/23: 功能：将进程中一个已经打开的文件复制一份并分配到一个新的文件描述符中。
+/// 参数：fd 表示进程中一个已经打开的文件的文件描述符。
+/// 返回值：如果出现了错误则返回 -1，否则能够访问已打开文件的新文件描述符。
+/// 可能的错误原因是：传入的 fd 并不对应一个合法的已打开文件。
+/// syscall ID：24
+/// 当前sys_dup还不能复制到指定的文件描述符上，后续可以扩展为 sys_dup2。
 pub fn sys_dup(fd: usize) -> isize {
 	trace!("kernel:pid[{}] sys_dup", current_task().unwrap().pid.0);
     let task = current_task().unwrap();
